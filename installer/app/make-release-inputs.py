@@ -49,7 +49,10 @@ DEVICE_CLASS = "j714sap"
 # apple,k114s is the EXPERIMENTAL K114s (MacBook Pro 14-inch OLED, M5 Pro,
 # Mac17,13, board 0x14), tested on one machine; it needs a K114s image
 # (allowed_device_classes [k114sap]), which this repo does not build.
-BOARDS = {"apple,j714s": "j714sap", "apple,k114s": "k114sap"}
+# apple,j716s is the EXPERIMENTAL J716s (MacBook Pro 16-inch, M5 Pro, Mac17,8,
+# board 0x0c), tested on one machine; it takes a J716s image
+# (allowed_device_classes [j716sap]) and installer/patches-j716s.
+BOARDS = {"apple,j714s": "j714sap", "apple,k114s": "k114sap", "apple,j716s": "j716sap"}
 READ_BLOCK = 8 * 1024 * 1024
 VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 EVIDENCE = re.compile(r"^[0-9a-z.-]+$")

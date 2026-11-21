@@ -45,8 +45,8 @@ import hashlib, json, os, pathlib, sys
 catalog, resources, mode = json.load(open(sys.argv[1])), pathlib.Path(sys.argv[2]), sys.argv[3]
 models = catalog["models"]
 board = os.environ.get("CHECK_APP_BOARD", "apple,j714s")
-if board not in ("apple,j714s", "apple,k114s"):
-    raise SystemExit("check-app: CHECK_APP_BOARD must be apple,j714s or apple,k114s")
+if board not in ("apple,j714s", "apple,k114s", "apple,j716s"):
+    raise SystemExit("check-app: CHECK_APP_BOARD must be apple,j714s, apple,k114s or apple,j716s")
 if [m["deviceIdentifier"] for m in models] != [board] or models[0]["status"] != "enabled":
     raise SystemExit("check-app: the sealed catalog must enable exactly " + board)
 model = models[0]

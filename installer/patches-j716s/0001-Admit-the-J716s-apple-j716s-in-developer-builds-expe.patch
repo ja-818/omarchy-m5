@@ -1,0 +1,603 @@
+From f82349167052b0db60bc461b7418a0401a643861 Mon Sep 17 00:00:00 2001
+From: Julian Arango <95070226+ja-818@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 12:00:18 -0500
+Subject: [PATCH] Admit the J716s (apple,j716s) in developer builds:
+ experimental, one machine
+
+The 16-inch MacBook Pro with M5 Pro (Mac17,8, J716s, board 0x0c, T6050)
+as a developer-only board, for one owner's test (ja-818). Not booted yet.
+
+Apple's 27.2 restore image (26B123) already carries the J716s: its
+j716sap identities (ApBoardID 0x0C, ApChipID 0x6050, iBoot.j716s
+mBoot-20457.41.3) name the same DCP (t605xdcp), GPU (armfw_g17x), ANE,
+AVE and AOP firmware, by digest, as the j714sap ones, and the same N1
+FTAB (t2026macG1, Wireless1 chip 0x2026, board 2113). The release 9
+kernel package already ships t6050-j716s.dtb (aurora-silicon/linux
+677be395, #1167).
+
+- Engine: j716sap device (27.2, expert off), j716sap on the 26B123 row
+  beside j714sap, and the board 0x0c gate. BOARD_MACHO j716sap takes the
+  J714s image's own Stage 1 members (stage1-j714s.{bin,macho}): Stage 1 is
+  chip-level and only chainloads the ESP Stage 2, whose device trees
+  include t6050-j716s.dtb. The image is bound to the board by its
+  installer_data (allowed_device_classes [j716sap]), so a J714s image is
+  still refused on a J716s and back.
+- Centauri: the N1 FTAB is ticketed for j716sap/0x0c as for j714sap/0x08
+  (apple/centauri/j716s-ftab.bin, the name the J716s device tree asks for).
+- supported-models.json: apple,j716s as a developer board; MacModelNames:
+  J716s; test_make_unsigned_catalog: the developer board set.
+- Tests: the J716s board row, its Mach-O Stage 1 install, the refusals
+  (J714s image on a J716s and back, wrong firmware, mixed metadata,
+  missing members), the 26B123 row for j716sap, the Centauri ticket for
+  j716sap and its board refusals.
+- Engine v0.9.2-omarchy.20261121.7aeda1cfee47 (engine_pin.py name),
+  rebuilt with rebuild-python-overlay.py from the authenticated engine.28
+  base: 17915198 bytes, sha256
+  4316cc91f79b6aa24a5056147710f2127736d50d114e2dec3fbb78ad0dee7480, two
+  identical rebuilds, prepare-engine.py reproduces it.
+
+Checked: engine overlay tests (448, 27 skips), scripts tests
+test_make_unsigned_catalog (40), ./test/all (portable checks passed),
+engine_pin.py check, prepare-engine.py. Not run: nothing here has been
+booted on a J716s.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Engine/overlay/src/omarchy_asahi.py           |  14 +++
+ Engine/overlay/src/omarchy_centauri.py        |  12 +-
+ Engine/overlay/tests/test_omarchy_asahi.py    | 106 ++++++++++++++++++
+ Engine/overlay/tests/test_omarchy_centauri.py |  27 +++++
+ Engine/overlay/tests/test_omarchy_firmware.py |  20 +++-
+ .../patches/0001-omarchy-engine-runtime.patch |  36 +++---
+ Engine/source-lock.json                       |  22 ++--
+ .../MacModelNames.swift                       |   1 +
+ scripts/supported-models.json                 |   3 +-
+ scripts/tests/test_make_unsigned_catalog.py   |   2 +-
+ 10 files changed, 210 insertions(+), 33 deletions(-)
+
+diff --git a/Engine/overlay/src/omarchy_asahi.py b/Engine/overlay/src/omarchy_asahi.py
+index 807a74f..1090386 100644
+--- a/Engine/overlay/src/omarchy_asahi.py
++++ b/Engine/overlay/src/omarchy_asahi.py
+@@ -596,6 +596,20 @@ BOARD_MACHO = {
+         "the 14-inch OLED MacBook Pro (M5 Pro, K114s) on macOS 27.2 stub firmware",
+         compress=True,
+     ),
++    # EXPERIMENTAL J716s (developer build only; one machine, not qualified).
++    # Stage 1 is chip-level (it only chainloads the ESP Stage 2), so the J716s
++    # takes the J714s image's own Stage 1 members unchanged; the image is bound
++    # to the board by its installer_data (allowed_device_classes j716sap). The
++    # 26B123 stub's j716sap identity (board 0x0c) names the same DCP, GPU, ANE,
++    # AVE and AOP firmware, by digest, as the j714sap one, and the Stage 2
++    # carries every t6050-*.dtb, t6050-j716s.dtb included (Aura picks by
++    # compatible).
++    "j716sap": BoardMachO(
++        "esp/aurora/stage1-j714s.bin", "esp/aurora/stage1-j714s.macho",
++        "esp/" + MACHO_CTXR_STAGE2, 15000, "27.2",
++        "the 16-inch MacBook Pro (M5 Pro, J716s) on macOS 27.2 stub firmware",
++        compress=True,
++    ),
+ }
+ 
+ 
+diff --git a/Engine/overlay/src/omarchy_centauri.py b/Engine/overlay/src/omarchy_centauri.py
+index 2d9c1c6..2e2e92a 100644
+--- a/Engine/overlay/src/omarchy_centauri.py
++++ b/Engine/overlay/src/omarchy_centauri.py
+@@ -218,6 +218,13 @@ def _read(installer, path, limit):
+     return data
+ 
+ 
++# T6050 boards whose N1 (Centauri) FTAB is ticketed from the selected restore
++# identity, by device class and board ID. EXPERIMENTAL J716s: its 26B123
++# macOS Customer identity names the same FTAB (t2026macG1, Wireless1 chip
++# 0x2026, board 2113) and the same digests as the J714s's.
++CENTAURI_BOARDS = {"j714sap": 0x08, "j716sap": 0x0C}
++
++
+ def prepare(installer):
+     """Return normal FWPackage (name, bytes), or None for a legacy board.
+ 
+@@ -225,13 +232,14 @@ def prepare(installer):
+     use that StubInstaller's existing ZIP/cache, never another firmware URL.
+     """
+     sysinfo = getattr(installer, "sysinfo", None)
+-    if getattr(sysinfo, "device_class", "") != "j714sap":
++    board_id = CENTAURI_BOARDS.get(getattr(sysinfo, "device_class", ""))
++    if board_id is None:
+         return None
+     try:
+         identity = installer.identity
+         info = identity["Info"]
+         manifest = installer.manifest
+-        if (sysinfo.chip_id != 0x6050 or sysinfo.board_id != 0x08
++        if (sysinfo.chip_id != 0x6050 or sysinfo.board_id != board_id
+                 or info["DeviceClass"] != sysinfo.device_class
+                 or _number(identity["ApChipID"]) != sysinfo.chip_id
+                 or _number(identity["ApBoardID"]) != sysinfo.board_id
+diff --git a/Engine/overlay/tests/test_omarchy_asahi.py b/Engine/overlay/tests/test_omarchy_asahi.py
+index 514d929..54134f3 100644
+--- a/Engine/overlay/tests/test_omarchy_asahi.py
++++ b/Engine/overlay/tests/test_omarchy_asahi.py
+@@ -934,6 +934,112 @@ class AsahiStage1AdapterTests(unittest.TestCase):
+                     adapter.preflight(self.plan)
+                 self.assertEqual(installer.dutil.add_calls, [])
+ 
++    # EXPERIMENTAL J716s (MacBook Pro 16-inch, M5 Pro, board 0x0c).
++    J716S_POLICY = {"kind": "board-macho-ctxr-v1", "qualified_machines": {"j716sap": ["27.2"]}}
++
++    def _j716s_payload(self, stage2=b"aura ctxr stage2 j716s", drop=()):
++        raw = j700_stage1()
++        with zipfile.ZipFile(self.payload) as archive:
++            entries = {name: archive.read(name) for name in archive.namelist()}
++        entries["esp/aurora/stage1-j714s.bin"] = raw
++        entries["esp/aurora/stage1-j714s.macho"] = aura_macho(raw)
++        entries["esp/m1n1/boot-ctxr.bin"] = stage2
++        for name in drop:
++            entries.pop(name)
++        with zipfile.ZipFile(self.payload, "w") as archive:
++            for name, data in entries.items():
++                archive.writestr(name, data)
++        for name, data in entries.items():
++            if name.startswith("esp/"):
++                path = self.installed_esp / name[len("esp/"):]
++                path.parent.mkdir(parents=True, exist_ok=True)
++                path.write_bytes(data)
++        return raw
++
++    def _j716s_metadata(self, policy=None, allowed=("j716sap",)):
++        metadata = self._target_metadata()
++        metadata["allowed_device_classes"] = list(allowed)
++        metadata["aurora_stage1"] = self.J716S_POLICY if policy is None else policy
++        metadata["recovery_gui"] = "omarchy-native-v1"
++        self._write_metadata([metadata])
++
++    def _j716s_installer(self, ipsw="27.2", device_class="j716sap"):
++        installer = FakeInstaller(FakeDiskUtil([[self.free]]))
++        installer.sysinfo = SimpleNamespace(device_class=device_class, sys_firmware="mBoot-20457.41.3")
++        installer.ipsw.version = ipsw
++        return installer
++
++    def test_j716s_board_row_is_its_own_and_matches_the_j714s_mechanics(self):
++        board = BOARD_MACHO["j716sap"]
++        # The J714s image's own chip-level Stage 1 members.
++        self.assertEqual(board.raw, "esp/aurora/stage1-j714s.bin")
++        self.assertEqual(board.macho, "esp/aurora/stage1-j714s.macho")
++        self.assertEqual(board.stage2, "esp/m1n1/boot-ctxr.bin")
++        self.assertEqual((board.window_ms, board.os_firmware, board.compress), (15000, "27.2", True))
++        self.assertIn("J716s", board.macs)
++
++    def test_j716s_installs_its_own_filled_mach_o_stage1(self):
++        raw = self._j716s_payload()
++        self._j716s_metadata()
++        installer = self._j716s_installer()
++        adapter = self._adapter(installer)
++        with patch("omarchy_asahi.omarchy_recovery.validate_payload"):
++            adapter.preflight(self.plan)
++        self.assertTrue(adapter.preflight_complete)
++        adapter.prepare_target(self.plan)
++        partition_disk = adapter.osins.partition_disk
++        def with_a_real_esp_uuid(name, size):
++            partition_disk(name, size)
++            adapter.osins.efi_part.uuid = self.J714S_ESP.upper()
++        adapter.osins.partition_disk = with_a_real_esp_uuid
++        with patch("omarchy_asahi.omarchy_recovery.stage") as stage:
++            adapter.install_stub_and_esp(self.plan)
++        boot_object = Path(installer.ins.boot_obj_path).read_bytes()
++        expected_raw = fill_aurora_stage1(raw, self.J714S_ESP, "m1n1/boot-ctxr.bin", 15000)
++        self.assertEqual(boot_object, aura_macho(expected_raw))
++        self.assertIs(stage.call_args.kwargs["macho_compress"], True)
++        self.assertEqual((self.installed_esp / "m1n1/boot-ctxr.bin").read_bytes(), b"aura ctxr stage2 j716s")
++
++    def test_j716s_and_j714s_images_are_never_crossed(self):
++        # A J716s image on a J714s, and a J714s image on a J716s, are refused before any disk write.
++        self._j716s_payload()
++        self._j716s_metadata()
++        installer = self._j716s_installer(device_class="j714sap")
++        adapter = self._adapter(installer)
++        with self.assertRaises(AsahiAdapterError), patch("omarchy_asahi.omarchy_recovery.validate_payload"):
++            adapter.preflight(self.plan)
++        self.assertEqual(installer.dutil.add_calls, [])
++        self._j714s_payload()
++        self._j714s_metadata()
++        installer = self._j716s_installer()
++        adapter = self._adapter(installer)
++        with self.assertRaisesRegex(AsahiAdapterError, "not qualified for this Mac"), patch(
++                "omarchy_asahi.omarchy_recovery.validate_payload"):
++            adapter.preflight(self.plan)
++        self.assertEqual(installer.dutil.add_calls, [])
++
++    def test_j716s_refuses_wrong_firmware_mixed_metadata_and_missing_objects(self):
++        cases = (
++            ("27.3", {}, None, "qualified only on 27.2"),
++            ("27.2", {"drop": ("esp/aurora/stage1-j714s.macho",)}, None, "no Mach-O Stage 1"),
++            ("27.2", {"drop": ("esp/m1n1/boot-ctxr.bin",)}, None, "no esp/m1n1/boot-ctxr.bin"),
++            ("27.2", {"stage2": b""}, None, "empty esp/m1n1/boot-ctxr.bin"),
++            ("27.2", {}, ("j716sap", "j714sap"), "Mach-O Stage 1"),
++        )
++        for ipsw, case, allowed, message in cases:
++            with self.subTest(ipsw=ipsw, case=sorted(case), message=message):
++                self._j716s_payload(**case)
++                if allowed:
++                    self._j716s_metadata(allowed=allowed)
++                else:
++                    self._j716s_metadata()
++                installer = self._j716s_installer(ipsw)
++                adapter = self._adapter(installer)
++                with self.assertRaisesRegex(AsahiAdapterError, message), patch(
++                        "omarchy_asahi.omarchy_recovery.validate_payload"):
++                    adapter.preflight(self.plan)
++                self.assertEqual(installer.dutil.add_calls, [])
++
+     def test_oled_multitouch_machines_also_collects_k_directories(self):
+         from omarchy_asahi import _oled_multitouch_machines
+         seen = []
+diff --git a/Engine/overlay/tests/test_omarchy_centauri.py b/Engine/overlay/tests/test_omarchy_centauri.py
+index de56640..956b480 100644
+--- a/Engine/overlay/tests/test_omarchy_centauri.py
++++ b/Engine/overlay/tests/test_omarchy_centauri.py
+@@ -81,6 +81,33 @@ class CentauriTests(unittest.TestCase):
+         self.assertIsNone(c.prepare(installer))
+         self.assertEqual(installer.reads, [])
+ 
++    def _j716s(self):
++        installer, files = fixture()
++        installer.sysinfo.device_class = 'j716sap'
++        installer.sysinfo.board_id = 0x0C
++        installer.sysinfo.dt = {'target-type': b'J716s\0'}
++        installer.identity['ApBoardID'] = '0x0C'
++        installer.identity['Info']['DeviceClass'] = 'j716sap'
++        prefix = 'Firmware/Manifests/restore/macOS Customer/centauri/centauri.'
++        files[prefix + 'j716sap.im4m'] = files.pop(prefix + 'j714sap.im4m')
++        return installer, files
++
++    def test_j716s_tickets_its_own_identity(self):
++        installer, files = self._j716s()
++        name, output = c.prepare(installer)
++        self.assertEqual(name, 'apple/centauri/j716s-ftab.bin')
++        self.assertEqual(output[len(files['Firmware/ftab.bin']):],
++                         files['Firmware/Manifests/restore/macOS Customer/centauri/centauri.j716sap.im4m'])
++        self.assertEqual(set(installer.reads), set(files))
++
++    def test_j716s_with_another_board_id_rejects_before_firmware_reads(self):
++        for board in (0x08, 0x14):
++            installer, _ = self._j716s()
++            installer.sysinfo.board_id = board
++            with self.subTest(board=board), self.assertRaises(c.CentauriError):
++                c.prepare(installer)
++            self.assertEqual(installer.reads, [])
++
+     def test_accessory_identity_is_independent_of_ap_board(self):
+         for options in ({'board': 8}, {'chip': 0x6050}, {'personalized': True}, {'production': False}):
+             with self.subTest(options=options), self.assertRaises(c.CentauriError):
+diff --git a/Engine/overlay/tests/test_omarchy_firmware.py b/Engine/overlay/tests/test_omarchy_firmware.py
+index 369d5d2..e77af0f 100644
+--- a/Engine/overlay/tests/test_omarchy_firmware.py
++++ b/Engine/overlay/tests/test_omarchy_firmware.py
+@@ -122,7 +122,8 @@ class PatchedFirmwareTableTests(unittest.TestCase):
+         candidate, = [item for item in IPSW_VERSIONS if "j714sap" in (item.devices or [])]
+         self.assertEqual((candidate.version, candidate.min_macos, candidate.min_iboot, candidate.min_sfr,
+                           candidate.expert_only, candidate.devices),
+-                         ("27.2", "27.2", "mBoot-20457.41.3", "26.2.123.0.0,0", False, ["j714sap"]))
++                         ("27.2", "27.2", "mBoot-20457.41.3", "26.2.123.0.0,0", False,
++                          ["j714sap", "j716sap"]))
+         self.assertEqual(candidate.url,
+                          "https://updates.cdn-apple.com/2026FallFCS/c9671975-52db-4fb5-9af2-00217169ba8d/"
+                          "UniversalMac_27.2_26B123_Restore.ipsw")
+@@ -145,7 +146,8 @@ class PatchedFirmwareTableTests(unittest.TestCase):
+                 self.assertEqual(choose(system, device, ["27.2"]), (None, STUB_SIZE_MACOS26))
+ 
+     def test_j714s_restore_is_not_offered_to_legacy_or_sibling_devices(self):
+-        for board in ("j700ap", "j613ap", "j714cap", "j716sap"):
++        # EXPERIMENTAL J716s: the same 26B123 row; its siblings still get nothing.
++        for board in ("j700ap", "j613ap", "j714cap", "j716cap"):
+             system = SimpleNamespace(device_class=board, chip_id=0x6050,
+                                      sys_firmware="mBoot-20457.60.65.0.1", macos_ver="27.3",
+                                      sfr_full_ver="26.3.35.5.18,0")
+@@ -155,15 +157,25 @@ class PatchedFirmwareTableTests(unittest.TestCase):
+             self.assertEqual(available, [], board)
+ 
+ 
++    def test_j716s_takes_the_27_2_stub_under_27_2_or_newer_system_firmware(self):
++        stock = dict(sys_firmware="mBoot-20457.41.3", macos_ver="27.2", sfr_full_ver="26.2.123.0.0,0")
++        system, device = mac("j716sap", 0x6050, **stock)
++        self.assertEqual(choose(system, device, ["27.2"]), ("27.2", STUB_SIZE_MACOS26))
++        self.assertEqual(choose(system, device, ["27.3"]), (None, STUB_SIZE_MACOS26))
++        system, device = mac("j716sap", 0x6050, **{**stock, "macos_ver": "27.1"})
++        self.assertEqual(choose(system, device, ["27.2"]), (None, STUB_SIZE_MACOS26))
++
+ class FirmwareRebuildTests(unittest.TestCase):
+     """The firmware rebuild path matches the installed macOS version to a row."""
+ 
+     def test_a_k114s_takes_the_26b8125_row_and_a_j714s_the_26b123_row(self):
+-        for board, long_version in (("k114sap", "26.2.125.8.0,0"), ("j714sap", "26.2.123.0.0,0")):
++        for board, long_version, devices in (("k114sap", "26.2.125.8.0,0", ["k114sap"]),
++                                             ("j714sap", "26.2.123.0.0,0", ["j714sap", "j716sap"]),
++                                             ("j716sap", "26.2.123.0.0,0", ["j714sap", "j716sap"])):
+             with self.subTest(board=board):
+                 ipsw = installed_ipsw(IPSW_VERSIONS, SimpleNamespace(device_class=board), "27.2")
+                 self.assertEqual((ipsw.version, ipsw.min_sfr, ipsw.devices),
+-                                 ("27.2", long_version, [board]))
++                                 ("27.2", long_version, devices))
+ 
+     def test_the_patch_uses_it_where_the_install_is_matched_by_version(self):
+         main = PATCH.read_text().split("diff --git a/src/main.py")[1].split("diff --git")[0]
+diff --git a/Engine/patches/0001-omarchy-engine-runtime.patch b/Engine/patches/0001-omarchy-engine-runtime.patch
+index 62f80ee..8157dda 100644
+--- a/Engine/patches/0001-omarchy-engine-runtime.patch
++++ b/Engine/patches/0001-omarchy-engine-runtime.patch
+@@ -35,7 +35,7 @@ index 21031fd..76c0935 100755
+  
+  echo "Packaging installer..."
+ diff --git a/src/main.py b/src/main.py
+-index 88dd2ab..5003700 100644
++index 88dd2ab..7786d1d 100644
+ --- a/src/main.py
+ +++ b/src/main.py
+ @@ -4,11 +4,16 @@ import os, os.path, shlex, subprocess, sys, time, termios, json, getpass, report
+@@ -55,7 +55,7 @@ index 88dd2ab..5003700 100644
+  
+  # Minimum free space to leave when resizing, to allow for OS upgrades
+  MIN_FREE_OS = psize("38GB")
+-@@ -49,9 +54,16 @@ CHIP_MIN_VER = {
++@@ -49,9 +54,19 @@ CHIP_MIN_VER = {
+      0x6030: "14.8.3",   # T6030, M3 Pro
+      0x6031: "14.8.3",   # T6031, M3 Max (16-core)
+      0x6034: "14.8.3",   # T6034, M3 Max (14-core)
+@@ -68,11 +68,14 @@ index 88dd2ab..5003700 100644
+ +    # EXPERIMENTAL K114s (developer build only): MacBook Pro 14-inch
+ +    # OLED (M5 Pro), Mac17,13, board 0x14. Tested on one machine only.
+ +    "k114sap":  Device("27.2", False),
+++    # EXPERIMENTAL J716s (developer build only): MacBook Pro 16-inch
+++    # (M5 Pro), Mac17,8, board 0x0c. Tested on one machine only.
+++    "j716sap":  Device("27.2", False),
+ +    "j700ap":   Device("26.6", False),  # MacBook Neo (A18 Pro, 2026)
+      "j274ap":   Device("11.0", False),  # Mac mini (M1, 2020)
+      "j293ap":   Device("11.0", False),  # MacBook Pro (13-inch, M1, 2020)
+      "j313ap":   Device("11.0", False),  # MacBook Air (M1, 2020)
+-@@ -95,6 +107,42 @@ if os.environ.get("ALLOW_VM", None):
++@@ -95,6 +110,45 @@ if os.environ.get("ALLOW_VM", None):
+      DEVICES["vma2macosap"] = Device("12.0", False)
+  
+  IPSW_VERSIONS = [
+@@ -94,12 +97,15 @@ index 88dd2ab..5003700 100644
+ +         "https://updates.cdn-apple.com/2026SummerFCS/fullrestores/140-75212/A2A24B94-1FC1-45A3-93F7-C51B02AF1F4D/UniversalMac_26.6.2_25G83_Restore.ipsw"),
+ +    # Device-restricted: Apple 27.2 (26B123), J714s iBoot mBoot-20457.41.3, the
+ +    # stub aurora-silicon targets on T6050. RestoreLongVersion is from its RestoreVersion.plist.
+++    # EXPERIMENTAL J716s: the same image's j716sap identity (ApBoardID 0x0C,
+++    # ApChipID 0x6050, iBoot.j716s mBoot-20457.41.3) names the same DCP, GPU,
+++    # ANE, AVE and AOP firmware, by digest, as the j714sap one.
+ +    IPSW("27.2",
+ +         "27.2",
+ +         "mBoot-20457.41.3",
+ +         "26.2.123.0.0,0",
+ +         False,
+-+         ["j714sap"],
+++         ["j714sap", "j716sap"],
+ +         "https://updates.cdn-apple.com/2026FallFCS/c9671975-52db-4fb5-9af2-00217169ba8d/UniversalMac_27.2_26B123_Restore.ipsw"),
+ +    # EXPERIMENTAL K114s: the OLED MacBook Pros' own 27.2 restore image
+ +    # (26B8125; SupportedProductTypes Mac17,10-13), whose k114sap identity is
+@@ -115,7 +121,7 @@ index 88dd2ab..5003700 100644
+      IPSW("12.3.1",
+           "12.1",
+           "iBoot-7459.101.3",
+-@@ -128,7 +176,10 @@ IPSW_VERSIONS = [
++@@ -128,7 +182,10 @@ IPSW_VERSIONS = [
+  class InstallerMain:
+      def __init__(self, version):
+          self.version = version
+@@ -126,7 +132,7 @@ index 88dd2ab..5003700 100644
+          self.credentials_validated = False
+          self.expert = False
+          self.ipsw = None
+-@@ -529,11 +580,7 @@ class InstallerMain:
++@@ -529,11 +586,7 @@ class InstallerMain:
+  
+          os.makedirs("vendorfw", exist_ok=True)
+          fw_pkg = asahi_firmware.core.FWPackage("vendorfw")
+@@ -139,7 +145,7 @@ index 88dd2ab..5003700 100644
+          if ipsw is None:
+              p_error(f"This install is using an unsupported macOS version {osi.version}")
+              p_message("Unable to rebuild firmware")
+-@@ -585,20 +632,11 @@ class InstallerMain:
++@@ -585,20 +638,11 @@ class InstallerMain:
+          self.step2(report=True)
+  
+      def choose_ipsw(self, supported_fw=None):
+@@ -165,7 +171,7 @@ index 88dd2ab..5003700 100644
+  
+          minver.sort(key=lambda ipsw: split_ver(ipsw.version))
+  
+-@@ -812,18 +850,15 @@ class InstallerMain:
++@@ -812,18 +856,15 @@ class InstallerMain:
+          else:
+              target = resizable[0]
+  
+@@ -193,7 +199,7 @@ index 88dd2ab..5003700 100644
+  
+          min_perc = 100 * min_size / total
+  
+-@@ -922,6 +957,25 @@ class InstallerMain:
++@@ -922,6 +963,25 @@ class InstallerMain:
+  
+          return True
+  
+@@ -219,7 +225,7 @@ index 88dd2ab..5003700 100644
+      def action_select_disk(self):
+          choices = {"1": "Internal storage"}
+  
+-@@ -939,21 +993,22 @@ class InstallerMain:
++@@ -939,21 +999,22 @@ class InstallerMain:
+          return True
+  
+      def main(self):
+@@ -255,7 +261,7 @@ index 88dd2ab..5003700 100644
+              p_message("By default, this installer will hide certain advanced options that")
+              p_message("are only useful for Asahi Linux developers. You can enable expert mode")
+              p_message("to show them. Do not enable this unless you know what you are doing.")
+-@@ -970,7 +1025,26 @@ class InstallerMain:
++@@ -970,7 +1031,28 @@ class InstallerMain:
+  
+          self.chip_min_ver = CHIP_MIN_VER.get(self.sysinfo.chip_id, None)
+          self.device = DEVICES.get(self.sysinfo.device_class, None)
+@@ -265,11 +271,13 @@ index 88dd2ab..5003700 100644
+ +            and self.device
+ +            and (not self.device.expert_only or self.expert)
+ +            and (
+-+                self.sysinfo.device_class not in ("j714sap", "k114sap")
+++                self.sysinfo.device_class not in ("j714sap", "k114sap", "j716sap")
+ +                or (self.sysinfo.device_class == "j714sap"
+ +                    and self.sysinfo.chip_id == 0x6050 and self.sysinfo.board_id == 0x08)
+ +                or (self.sysinfo.device_class == "k114sap"
+ +                    and self.sysinfo.chip_id == 0x6050 and self.sysinfo.board_id == 0x14)
+++                or (self.sysinfo.device_class == "j716sap"
+++                    and self.sysinfo.chip_id == 0x6050 and self.sysinfo.board_id == 0x0C)
+ +            )
+ +        )
+ +        if self.engine_runtime:
+@@ -283,7 +291,7 @@ index 88dd2ab..5003700 100644
+              p_error("This device is not supported yet!")
+              p_error("Please check out the Asahi Linux Blog for updates on device support:")
+              print()
+-@@ -1126,6 +1200,19 @@ class InstallerMain:
++@@ -1126,6 +1208,19 @@ class InstallerMain:
+  
+          if self.cur_os is None and self.sysinfo.boot_mode != "macOS":
+              self.cur_os = default_os
+@@ -303,7 +311,7 @@ index 88dd2ab..5003700 100644
+          self.check_cur_os()
+  
+          actions = {}
+-@@ -1226,7 +1313,11 @@ if __name__ == "__main__":
++@@ -1226,7 +1321,11 @@ if __name__ == "__main__":
+          logging.exception("Process execution failed")
+          p_warning("If you need to file a bug report, please attach the log file:")
+          p_warning(f"  {os.getcwd()}/installer.log")
+diff --git a/Engine/source-lock.json b/Engine/source-lock.json
+index ebd9fa8..3d9fd6c 100644
+--- a/Engine/source-lock.json
++++ b/Engine/source-lock.json
+@@ -141,7 +141,7 @@
+     }
+   },
+   "downstream_overlay": {
+-    "version": "v0.9.2-omarchy.20261115.d33f2cef00c4",
++    "version": "v0.9.2-omarchy.20261121.7aeda1cfee47",
+     "capability": "candidate_bound_full_os_stage_one_authenticated_recovery",
+     "minimum_app_version": "2.3.0",
+     "engine_modes": [
+@@ -151,7 +151,7 @@
+     ],
+     "patch": {
+       "path": "patches/0001-omarchy-engine-runtime.patch",
+-      "sha256": "ae498375f0fd6b4072b1c364adaa9b395aaf374bc2ac45602564b24bf779b8da"
++      "sha256": "6915b1105fdc9a33cc8303a00a6cb5dcb5c053780809cce2f4aa1c9d324c2258"
+     },
+     "files": [
+       {
+@@ -172,7 +172,7 @@
+       {
+         "path": "overlay/src/omarchy_asahi.py",
+         "destination": "src/omarchy_asahi.py",
+-        "sha256": "93412c55cf825d45f1ed11aa2e04b23b2cc24bd892a07eb354ff7b905e741097"
++        "sha256": "29b62a86d38c49efeb93e840b1ed87234fc669387c2ce09a7fcb105ceb75afff"
+       },
+       {
+         "path": "overlay/src/omarchy_contract.py",
+@@ -207,7 +207,7 @@
+       {
+         "path": "overlay/tests/test_omarchy_asahi.py",
+         "destination": "tests/test_omarchy_asahi.py",
+-        "sha256": "bbe23b2cd65576d291f545efba6cc28e9c6279f61a4b3c1ad0896eb90e91a5c6"
++        "sha256": "6661d0efa1b48482637ef3837cd814161778563fa69d89c1a3bebeffb5cd5c92"
+       },
+       {
+         "path": "overlay/tests/test_omarchy_contract.py",
+@@ -292,7 +292,7 @@
+       {
+         "path": "overlay/tests/test_omarchy_firmware.py",
+         "destination": "tests/test_omarchy_firmware.py",
+-        "sha256": "85e3bc2858e725bfabccefbcef81c4e21b4b30cc2d6866e90754352b6dd9a564"
++        "sha256": "27263a494cbc50475433dc547668162eed0f582f7bf7bde1b1ab99396dccbcab"
+       },
+       {
+         "path": "overlay/src/omarchy_als.py",
+@@ -342,12 +342,12 @@
+       {
+         "path": "overlay/src/omarchy_centauri.py",
+         "destination": "src/omarchy_centauri.py",
+-        "sha256": "2c5c4021983e303edce6d868c5992cc1238851238202f2e6b9c725a15394e42d"
++        "sha256": "5ae99cce961cf836f3fbbf4a12dc2e0292a50968177f63fad035857618129da6"
+       },
+       {
+         "path": "overlay/tests/test_omarchy_centauri.py",
+         "destination": "tests/test_omarchy_centauri.py",
+-        "sha256": "e1d90d09e20fb6325525c6c076b68af529ad0bcdcfb1a619dc0f2210f8244861"
++        "sha256": "b68347c60ccae0934f2f60da984622839e7272c0fc081550e447b850db78fc4e"
+       }
+     ]
+   },
+@@ -482,9 +482,9 @@
+     }
+   ],
+   "validation_artifact": {
+-    "filename": "installer-v0.9.2-omarchy.20261115.d33f2cef00c4.tar.gz",
+-    "size_bytes": 17914686,
+-    "sha256": "eac6cf71489f993e7b24780a5854f41d15b7dab239db3a1b3064d37fa8adc89b",
++    "filename": "installer-v0.9.2-omarchy.20261121.7aeda1cfee47.tar.gz",
++    "size_bytes": 17915198,
++    "sha256": "4316cc91f79b6aa24a5056147710f2127736d50d114e2dec3fbb78ad0dee7480",
+     "reproducibility_scope": "two-identical-python-overlay-repacks-authenticated-base",
+     "signature": "absent",
+     "metadata_sha256": "2e6181ce6b6e17c11039e04bfadade8d10ae0e11889885ad8c9960b68f179a5d"
+@@ -511,7 +511,7 @@
+           "upstream_base_sha256": "c8d4d2a80f3a88a9ba4d6d4024c0001062e35d15d72ae530681a0612e6525984",
+           "upstream_sha256": "894fb8cd2ffc672bb96a14969ee9de2879d250c8c5990fee122ccf66d9b50024",
+           "base_sha256": "95760ed02d44b5457acb81559a4e2d892ffbb7f0f2b7417c0b2eb02937945ae7",
+-          "sha256": "a386f6550562bc3cb92bf9609e73ebed238a7ce8e99b8ce4e39defdd55549d96"
++          "sha256": "fff996ffaedc68b6a928246cf9f8e159a5ff320cd605b45675c29c7c0903a1b1"
+         }
+       ]
+     },
+diff --git a/Sources/OmarchyInstallerUXCore/MacModelNames.swift b/Sources/OmarchyInstallerUXCore/MacModelNames.swift
+index 05a89a2..f153bdd 100644
+--- a/Sources/OmarchyInstallerUXCore/MacModelNames.swift
++++ b/Sources/OmarchyInstallerUXCore/MacModelNames.swift
+@@ -91,6 +91,7 @@
+       // Developer builds only: no public catalog lists it (scripts/supported-models.json).
+       "apple,j714s": mac("MacBook Pro 14-inch (M5 Pro, 2026)", "MacBook Pro", "M5"),
+       "apple,k114s": mac("MacBook Pro 14-inch OLED (M5 Pro, 2026)", "MacBook Pro", "M5"),
++      "apple,j716s": mac("MacBook Pro 16-inch (M5 Pro, 2026)", "MacBook Pro", "M5"),
+     ]
+   }
+ #endif
+diff --git a/scripts/supported-models.json b/scripts/supported-models.json
+index 19fecf2..15b0e21 100644
+--- a/scripts/supported-models.json
++++ b/scripts/supported-models.json
+@@ -43,7 +43,8 @@
+   },
+   "developer": {
+     "apple,j714s": "Untested developer preview: MacBook Pro 14-inch (M5 Pro, 2026), T6050, on macOS 27.3 firmware only; one J714s developer image, not qualified",
+-    "apple,k114s": "EXPERIMENTAL, tested on one machine only: MacBook Pro 14-inch OLED (M5 Pro, 2026), K114s, Mac17,13, T6050, board 0x14, on the 26B8125 macOS 27.2 stub; admission alone is a keyboard-only system; needs a K114s-only Stage 2 (apple,k114s device tree) and a K114s image, not qualified"
++    "apple,k114s": "EXPERIMENTAL, tested on one machine only: MacBook Pro 14-inch OLED (M5 Pro, 2026), K114s, Mac17,13, T6050, board 0x14, on the 26B8125 macOS 27.2 stub; admission alone is a keyboard-only system; needs a K114s-only Stage 2 (apple,k114s device tree) and a K114s image, not qualified",
++    "apple,j716s": "EXPERIMENTAL, tested on one machine only: MacBook Pro 16-inch (M5 Pro, 2026), J716s, Mac17,8, T6050, board 0x0c, on the 26B123 macOS 27.2 stub; needs a J716s image (Stage 2 with the apple,j716s device tree), not qualified"
+   },
+   "untested": {
+     "apple,j433": "Untested: Omarchy Mac previews are not yet qualified on M3 Macs",
+diff --git a/scripts/tests/test_make_unsigned_catalog.py b/scripts/tests/test_make_unsigned_catalog.py
+index 9effd66..9a569e7 100644
+--- a/scripts/tests/test_make_unsigned_catalog.py
++++ b/scripts/tests/test_make_unsigned_catalog.py
+@@ -274,7 +274,7 @@ class CatalogGeneratorTests(unittest.TestCase):
+         self.assertIn("apple,j700", manifest["untested"])
+         self.assertEqual(set(manifest["refused"]), {"apple,j575d", "apple,j614s"})
+         # Developer boards reach only a developer build's sealed catalog.
+-        self.assertEqual(set(manifest["developer"]), {"apple,j714s", "apple,k114s"})
++        self.assertEqual(set(manifest["developer"]), {"apple,j714s", "apple,k114s", "apple,j716s"})
+         for template in sorted(MANIFEST.parent.glob("release-inputs*.template.json")):
+             identifiers = json.loads(template.read_text())["device_identifiers"]
+             self.assertEqual(
+-- 
+2.56.0
+

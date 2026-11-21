@@ -70,6 +70,11 @@ on:
         description: App version (X.Y.Z, at least the engine's minimum_app_version)
         type: string
         default: 2.3.16
+      board:
+        description: The one developer board this build admits (apple,j716s is EXPERIMENTAL and needs the j716s patch set and a j716s-developer-image-* release)
+        type: choice
+        options: [apple,j714s, apple,j716s]
+        default: apple,j714s
 
 permissions:
   contents: read
@@ -91,6 +96,7 @@ env:
   PATCH_SETS: ${{ inputs.patch-sets }}
   VARIANTS: ${{ inputs.variants }}
   APP_VERSION: ${{ inputs.app-version }}
+  BOARD: ${{ inputs.board || 'apple,j714s' }}
 
 jobs:
   engine:
@@ -106,15 +112,18 @@ jobs:
       - name: Check the inputs
         run: |
           set -euo pipefail
+          [[ $BOARD == apple,j714s || $BOARD == apple,j716s ]] || { echo "::error::bad board"; exit 1; }
           if [[ -n $IMAGE_TAG ]]; then
-            [[ $IMAGE_TAG =~ ^j714s-developer-image-[A-Za-z0-9._-]+$ ]] || { echo "::error::bad image-tag"; exit 1; }
+            [[ $IMAGE_TAG =~ ^(j714s|j716s)-developer-image-[A-Za-z0-9._-]+$ ]] || { echo "::error::bad image-tag"; exit 1; }
             [[ $RELEASE_TAG =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$ ]] || { echo "::error::bad or missing release-tag"; exit 1; }
             name_pattern='^[A-Za-z0-9][A-Za-z0-9 ._()+-]{0,99}$'
             [[ $RELEASE_NAME =~ $name_pattern ]] || { echo "::error::bad or missing release-name"; exit 1; }
           else
             echo "::notice::no image-tag: stand-in payload, nothing is published"
           fi
-          [[ $ENGINE_URL =~ ^https://github\.com/betizzel/omarchy-m5/releases/download/[A-Za-z0-9._-]+/installer-v[A-Za-z0-9._-]+\.tar\.gz$ ]] \
+          # This repo's own engine releases, or betizzel/omarchy-m5's.
+          repo_pattern=${GITHUB_REPOSITORY//./\\.}
+          [[ $ENGINE_URL =~ ^https://github\.com/(betizzel/omarchy-m5|$repo_pattern)/releases/download/[A-Za-z0-9._-]+/installer-v[A-Za-z0-9._-]+\.tar\.gz$ ]] \
             || { echo "::error::bad engine-url"; exit 1; }
           [[ $ENGINE_SHA256 =~ ^[0-9a-f]{64}$ ]] || { echo "::error::bad engine-sha256"; exit 1; }
           [[ $PATCH_SETS =~ ^[a-z0-9.\ -]*$ ]] || { echo "::error::bad patch-sets"; exit 1; }
@@ -176,8 +185,14 @@ jobs:
           [[ $(uname -m) == arm64 ]]
           [[ $PATCH_SETS =~ ^[a-z0-9.\ -]*$ ]]
           [[ $APP_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          case $BOARD in
+            apple,j714s) label=J714s; model="MacBook Pro 14-inch M5 Pro" ;;
+            apple,j716s) label=J716s; model="MacBook Pro 16-inch M5 Pro, EXPERIMENTAL, one machine" ;;
+            *) echo "::error::bad board"; exit 1 ;;
+          esac
+          { echo "BOARD_LABEL=$label"; echo "BOARD_MODEL=$model"; } >>"$GITHUB_ENV"
           if [[ -n $IMAGE_TAG ]]; then
-            [[ $IMAGE_TAG =~ ^j714s-developer-image-[A-Za-z0-9._-]+$ ]]
+            [[ $IMAGE_TAG =~ ^(j714s|j716s)-developer-image-[A-Za-z0-9._-]+$ ]]
             [[ $RELEASE_TAG =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$ ]]
             if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
               echo "::error::release $RELEASE_TAG already exists"; exit 1
@@ -206,10 +221,10 @@ jobs:
           read -r -a sets <<<"$PATCH_SETS"
           bash omarchy-m5/installer/app/rebuild-installer-tree.sh installer ${sets[@]+"${sets[@]}"} 2>&1 \
             | { grep -v -e 'whitespace' -e '^\.git/rebase-apply' -e '^ ' || true; } | tee "$WORK/evidence/tree.txt"
-          python3 - installer/scripts/supported-models.json <<'PY'
+          python3 - installer/scripts/supported-models.json "$BOARD" <<'PY'
           import json, sys
-          if "apple,j714s" not in json.load(open(sys.argv[1])).get("developer", {}):
-              raise SystemExit("the tree does not admit apple,j714s in developer builds (add the j714s patch set)")
+          if sys.argv[2] not in json.load(open(sys.argv[1])).get("developer", {}):
+              raise SystemExit(f"the tree does not admit {sys.argv[2]} in developer builds (add its patch set)")
           PY
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -312,7 +327,7 @@ jobs:
           common=(--tree installer --engine "$ENGINE" --metadata "$METADATA" --payload "$PAYLOAD"
             --download-base-url "$DOWNLOAD_BASE" --catalog-base-url "$DOWNLOAD_BASE/no-channel"
             --app-version "$APP_VERSION" --evidence-revision "$EVIDENCE_REVISION"
-            --now "$ISSUED" --link --key-env J714S_CATALOG_KEY)
+            --now "$ISSUED" --link --key-env J714S_CATALOG_KEY --board "$BOARD")
           if [[ $VARIANTS != online ]]; then
             python3 -I omarchy-m5/installer/app/make-release-inputs.py "${common[@]}" \
               --mode offline --output "$WORK/inputs-offline" | tee "$WORK/evidence/inputs-offline.json"
@@ -359,8 +374,8 @@ jobs:
           OMARCHY_APP_VERSION=$APP_VERSION OMARCHY_APP_BUILD_NUMBER=$BUILD_NUMBER \
             bash Packaging/build-app.sh "$WORK/inputs-online" "$WORK/app-online"
           app="$WORK/app-online/$INSTALLER_APP_NAME.app"
-          bash ../omarchy-m5/installer/app/check-app.sh "$app" online "$WORK/inputs-online" | tee "$WORK/evidence/app-online.txt"
-          pkg=$WORK/out/Omarchy-Installer-J714s-online-$APP_VERSION-$BUILD_NUMBER.pkg
+          CHECK_APP_BOARD=$BOARD bash ../omarchy-m5/installer/app/check-app.sh "$app" online "$WORK/inputs-online" | tee "$WORK/evidence/app-online.txt"
+          pkg=$WORK/out/Omarchy-Installer-$BOARD_LABEL-online-$APP_VERSION-$BUILD_NUMBER.pkg
           bash Packaging/build-developer-pkg.sh "$app" "$pkg"
           echo "ONLINE_PKG=$pkg" >>"$GITHUB_ENV"
           df -h "$RUNNER_TEMP"
@@ -378,11 +393,11 @@ jobs:
           OMARCHY_APP_VERSION=$APP_VERSION OMARCHY_APP_BUILD_NUMBER=$BUILD_NUMBER \
             bash Packaging/build-app.sh "$WORK/inputs-offline" "$WORK/app-offline"
           app="$WORK/app-offline/$INSTALLER_APP_NAME.app"
-          bash ../omarchy-m5/installer/app/check-app.sh "$app" offline "$WORK/inputs-offline" | tee "$WORK/evidence/app-offline.txt"
+          CHECK_APP_BOARD=$BOARD bash ../omarchy-m5/installer/app/check-app.sh "$app" offline "$WORK/inputs-offline" | tee "$WORK/evidence/app-offline.txt"
           # The app holds its own verified copy now.
           rm -rf "$WORK/inputs-offline/offline-artifacts" "$PAYLOAD"
           df -h "$RUNNER_TEMP"
-          pkg=$WORK/out/Omarchy-Installer-J714s-$APP_VERSION-$BUILD_NUMBER.pkg
+          pkg=$WORK/out/Omarchy-Installer-$BOARD_LABEL-$APP_VERSION-$BUILD_NUMBER.pkg
           bash Packaging/build-developer-pkg.sh "$app" "$pkg"
           rm -rf "$WORK/app-offline"
           echo "OFFLINE_PKG=$pkg" >>"$GITHUB_ENV"
@@ -435,8 +450,8 @@ jobs:
         run: |
           set -euo pipefail
           cd "$WORK/out"
-          offline_name=Omarchy-Installer-J714s-$APP_VERSION-$BUILD_NUMBER.pkg
-          online_name=Omarchy-Installer-J714s-online-$APP_VERSION-$BUILD_NUMBER.pkg
+          offline_name=Omarchy-Installer-$BOARD_LABEL-$APP_VERSION-$BUILD_NUMBER.pkg
+          online_name=Omarchy-Installer-$BOARD_LABEL-online-$APP_VERSION-$BUILD_NUMBER.pkg
           offline_parts=()
           while read -r part; do offline_parts+=("$part"); done <"$WORK/offline-parts.txt"
           parts="${offline_parts[*]+${offline_parts[*]}}"
@@ -446,12 +461,12 @@ jobs:
           fingerprint=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["trust_root_fingerprint"])' "$inputs_json")
           tree=$(git -C "$GITHUB_WORKSPACE/installer" rev-parse 'HEAD^{tree}')
           {
-            echo "**Developer build for one Mac: the MacBook Pro 14-inch M5 Pro (J714s, \`apple,j714s\`). Ad hoc signed, not notarized, unsupported; this package has not been installed on hardware yet. It repartitions the internal disk: back up first.**"
+            echo "**Developer build for one Mac: the $BOARD_MODEL ($BOARD_LABEL, \`$BOARD\`). Ad hoc signed, not notarized, unsupported; this package has not been installed on hardware yet. It repartitions the internal disk: back up first.**"
             echo
-            echo "Installs the image from [\`$IMAGE_TAG\`](https://github.com/$GITHUB_REPOSITORY/releases/tag/$IMAGE_TAG) with the Omarchy Mac installer app (omacom/omarchy-mac-installer c07e54c + \`installer/patches\` + \`$PATCH_SETS\`, tree \`$tree\`), app $APP_VERSION build $BUILD_NUMBER. The app trusts only this build's catalog key (\`$fingerprint\`, made for this build and discarded) and reads only the catalog sealed inside it, which lists only the J714s. Nothing is downloaded from Omacom; Apple's restore firmware still comes from Apple."
+            echo "Installs the image from [\`$IMAGE_TAG\`](https://github.com/$GITHUB_REPOSITORY/releases/tag/$IMAGE_TAG) with the Omarchy Mac installer app (omacom/omarchy-mac-installer c07e54c + \`installer/patches\` + \`$PATCH_SETS\`, tree \`$tree\`), app $APP_VERSION build $BUILD_NUMBER. The app trusts only this build's catalog key (\`$fingerprint\`, made for this build and discarded) and reads only the catalog sealed inside it, which lists only the $BOARD_LABEL. Nothing is downloaded from Omacom; Apple's restore firmware still comes from Apple."
             echo
             qualified=$(python3 -c 'import json,sys; s=json.load(open(sys.argv[1]))["os_list"][0].get("aurora_stage1",{}); print("; ".join(k + ": stub macOS " + ", ".join(v) for k,v in s.get("qualified_machines",{}).items()) or "see installer_data.json")' "$METADATA")
-            echo "**Requirements:** a J714s with macOS at least as new as the stub it makes. The image's Stage 1 (\`installer_data.json\`) is qualified for $qualified; on anything else expect the installer to refuse. Free space for the Linux partitions (EFI 500 MB, Boot 2 GiB, Root at least 32 GiB) plus room to stage the 3.6 GB package; the app shows the exact sizes before it changes anything. Keep the charger connected."
+            echo "**Requirements:** a $BOARD_LABEL with macOS at least as new as the stub it makes. The image's Stage 1 (\`installer_data.json\`) is qualified for $qualified; on anything else expect the installer to refuse. Free space for the Linux partitions (EFI 500 MB, Boot 2 GiB, Root at least 32 GiB) plus room to stage the 3.6 GB package; the app shows the exact sizes before it changes anything. Keep the charger connected."
             echo
             if [[ -n $parts ]]; then
               echo "### Offline package (everything inside, ~3.6 GB)"
