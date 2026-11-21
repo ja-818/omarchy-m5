@@ -73,7 +73,7 @@ on:
       board:
         description: The one developer board this build admits (apple,j716s is EXPERIMENTAL and needs the j716s patch set and a j716s-developer-image-* release)
         type: choice
-        options: [apple,j714s, apple,j716s]
+        options: ['apple,j714s', 'apple,j716s']
         default: apple,j714s
 
 permissions:
